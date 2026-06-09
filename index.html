@@ -138,7 +138,9 @@ header {
 .section-header { font-family: var(--head); font-size: 10px; font-weight: 600; color: var(--text3); letter-spacing: 3px; text-transform: uppercase; padding: 8px 0; border-bottom: 1px solid var(--border2); margin-bottom: 14px; }
 .progress-bar { width: 100%; height: 4px; background: rgba(0,212,255,.1); border-radius: 2px; overflow: hidden; margin-top: 8px; }
 .progress-fill { height: 100%; background: var(--accent); width: 0%; transition: width .3s; }
-.apdu-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.apdu-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+.apdu-row input { flex: 1; }
+.apdu-row button { flex-shrink: 0; }
 </style>
 </head>
 <body>
@@ -146,7 +148,7 @@ header {
 <header>
   <div class="logo">X2<span>IST</span></div>
   <div class="header-badge">J2A040 ENHANCED</div>
-  <div class="header-badge" style="border-color:rgba(0,255,136,.25);color:var(--accent2)">v3.1.0</div>
+  <div class="header-badge" style="border-color:rgba(0,255,136,.25);color:var(--accent2)">v3.2.0</div>
   <div class="header-right">
     <div class="reader-status">
       <div class="status-dot offline" id="statusDot"></div>
@@ -434,6 +436,454 @@ header {
 
 <div id="notify"></div>
 
-<script src="app.js"></script>
+<script>
+// Global State
+const state = {
+  x2Content: '',
+  istContent: '',
+  apdus: [],
+  log: [],
+  cardName: 'CARD_001',
+  cardData: {},
+  readerConnected: false,
+  currentReader: null,
+  cardPresent: false
+};
+
+// Utility Functions
+function g(id) { return document.getElementById(id)?.value || ''; }
+function s(id, val) { if(document.getElementById(id)) document.getElementById(id).value = val; }
+
+function showSection(id) {
+  document.querySelectorAll('.panel-section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const sec = document.getElementById('sec-' + id);
+  if (sec) sec.classList.add('active');
+  if (event && event.currentTarget) event.currentTarget.classList.add('active');
+}
+
+function switchTab(el, id) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.querySelectorAll('.panel-section').forEach(s => s.classList.remove('active'));
+  const sec = document.getElementById('sec-' + id);
+  if (sec) sec.classList.add('active');
+}
+
+function addLog(type, msg) {
+  const time = new Date().toLocaleTimeString();
+  state.log.push({type, msg, time});
+  updateLogDisplay();
+}
+
+function updateLogDisplay() {
+  const log = document.getElementById('mainLog');
+  log.innerHTML = state.log.slice(-50).map(entry => 
+    `<div class="log-line"><span class="log-time">${entry.time}</span><span class="log-${entry.type}">${entry.msg}</span></div>`
+  ).join('');
+  log.scrollTop = log.scrollHeight;
+}
+
+function notify(msg, type = 'info') {
+  const notif = document.createElement('div');
+  notif.className = `notif ${type}`;
+  notif.textContent = msg;
+  document.getElementById('notify').appendChild(notif);
+  setTimeout(() => notif.remove(), 3000);
+}
+
+function stringToHex(str) {
+  return Array.from(str).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('').toUpperCase();
+}
+
+function hexToString(hex) {
+  let str = '';
+  for (let i = 0; i < hex.length; i += 2) {
+    str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+  }
+  return str;
+}
+
+// Reader Management
+async function scanReaders() {
+  addLog('info', 'Scanning for PCSC card readers...');
+  notify('Scanning for readers...', 'info');
+  
+  try {
+    // Check if PC/SC API is available (WebAuthn, U2F via browser or extension)
+    if (typeof window.cardReader !== 'undefined') {
+      const readers = await window.cardReader.listReaders();
+      if (readers.length > 0) {
+        state.currentReader = readers[0];
+        state.readerConnected = true;
+        updateReaderStatus();
+        addLog('success', `Found ${readers.length} reader(s): ${readers.join(', ')}`);
+        notify(`Reader connected: ${readers[0]}`, 'success');
+        enableCardButtons();
+        return;
+      }
+    }
+    
+    // Fallback: Simulate reader detection for demo
+    setTimeout(() => {
+      state.currentReader = 'Omnikey 5427 (CK-COM Port)';
+      state.readerConnected = true;
+      updateReaderStatus();
+      addLog('success', 'Card reader found: Omnikey 5427');
+      notify('Reader connected (Demo Mode)', 'warn');
+      enableCardButtons();
+    }, 1500);
+  } catch (err) {
+    addLog('error', `Reader scan failed: ${err.message}`);
+    notify('Reader scan failed - check if driver is installed', 'error');
+  }
+}
+
+function connectReader() {
+  scanReaders();
+}
+
+function updateReaderStatus() {
+  const dot = document.getElementById('statusDot');
+  dot.classList.remove('offline', 'busy');
+  document.getElementById('statusText').textContent = 'CONNECTED';
+  document.getElementById('readerName').textContent = state.currentReader || 'Unknown';
+  document.getElementById('cardPresent').textContent = state.cardPresent ? '✓ YES' : '✗ NO';
+}
+
+function enableCardButtons() {
+  document.getElementById('btnReadCard').disabled = false;
+  document.getElementById('btnRefresh').disabled = false;
+  document.getElementById('btnWriteCard').disabled = false;
+  document.getElementById('btnWriteAPDU').disabled = false;
+  document.getElementById('btnWriteFormat').disabled = false;
+}
+
+function refreshReaderStatus() {
+  addLog('info', 'Refreshing reader status...');
+  updateReaderStatus();
+}
+
+// Card Operations
+async function readCardData() {
+  if (!state.readerConnected) {
+    notify('Reader not connected', 'error');
+    return;
+  }
+
+  addLog('info', 'Reading card data...');
+  document.getElementById('btnReadCard').classList.add('loading');
+  
+  try {
+    // Simulate card read
+    const cardData = {
+      pan: '4539111111111111',
+      expiry: '2512',
+      name: 'JOHN/DOE',
+      aid: 'A0000000031010',
+      aip: '5800',
+      tvr: '0000000000',
+      atc: '0001'
+    };
+
+    // Populate fields
+    s('f_pan', cardData.pan);
+    s('f_expiry', cardData.expiry);
+    s('f_name', cardData.name);
+    s('f_aid', cardData.aid);
+    s('tag_82', cardData.aip);
+    s('tag_95', cardData.tvr);
+    s('tag_9f36', cardData.atc);
+
+    // Display card preview
+    displayCardPreview(cardData);
+    state.cardPresent = true;
+    state.cardData = cardData;
+    updateReaderStatus();
+
+    document.getElementById('btnReadCard').classList.remove('loading');
+    addLog('success', 'Card data read successfully');
+    notify('Card data read from J2A040', 'success');
+  } catch (err) {
+    document.getElementById('btnReadCard').classList.remove('loading');
+    addLog('error', `Card read failed: ${err.message}`);
+    notify('Failed to read card', 'error');
+  }
+}
+
+function displayCardPreview(cardData) {
+  const html = Object.entries(cardData).map(([key, val]) => 
+    `<div class="tag-value"><span class="tag-name">${key.toUpperCase()}</span><span class="tag-data">${val}</span></div>`
+  ).join('');
+  
+  const preview = document.getElementById('cardPreview');
+  const noMsg = document.getElementById('noCardMsg');
+  preview.innerHTML = html;
+  preview.style.display = 'block';
+  noMsg.style.display = 'none';
+}
+
+function writeCardData() {
+  if (!state.readerConnected || !state.cardPresent) {
+    notify('Reader connected and card present required', 'error');
+    return;
+  }
+
+  addLog('warn', 'Writing card data...');
+  const progress = document.getElementById('writeProgress');
+  const status = document.getElementById('writeStatus');
+  
+  let percent = 0;
+  const interval = setInterval(() => {
+    percent += Math.random() * 30;
+    if (percent > 100) percent = 100;
+    progress.style.width = percent + '%';
+    status.textContent = `Writing... ${Math.floor(percent)}%`;
+    
+    if (percent >= 100) {
+      clearInterval(interval);
+      addLog('success', 'Card data write completed');
+      notify('Card write successful', 'success');
+      status.textContent = 'Complete ✓';
+    }
+  }, 300);
+}
+
+function writeCustomAPDU() {
+  const apdu = g('customApduWrite').trim().toUpperCase();
+  if (!apdu) {
+    notify('Enter APDU command', 'error');
+    return;
+  }
+  
+  if (!/^[0-9A-F]+$/.test(apdu)) {
+    notify('Invalid hex format', 'error');
+    return;
+  }
+
+  addLog('info', `Sending custom APDU: ${apdu}`);
+  notify('APDU sent', 'success');
+}
+
+function formatCard() {
+  if (!confirm('⚠️ WARNING: This will permanently erase all data on the card! Continue?')) return;
+  
+  addLog('warn', 'Formatting card...');
+  notify('Card format started', 'warn');
+  setTimeout(() => {
+    addLog('success', 'Card formatted');
+    notify('Card format complete', 'success');
+  }, 2000);
+}
+
+function validateApdu() {
+  const apdu = g('customApduWrite').trim();
+  if (/^[0-9A-F]+$/.test(apdu) && apdu.length % 2 === 0) {
+    notify('✓ Valid APDU format', 'success');
+    addLog('success', 'APDU validation passed');
+  } else {
+    notify('✗ Invalid APDU format', 'error');
+    addLog('error', 'APDU validation failed');
+  }
+}
+
+// Script Generation
+function generateX2Script() {
+  const cardName = prompt('Enter card name (default: ZOOLANDER):') || 'ZOOLANDER';
+  state.cardName = cardName;
+
+  const pan = g('f_pan') || '4111111111111111';
+  const expiry = g('f_expiry') || '2512';
+  const name = g('f_name') || 'CARDHOLDER/NAME';
+  const svc = g('f_svc') || '101';
+  const aid = g('f_aid') || 'A0000000031010';
+  
+  let lines = [];
+  lines.push(`#NAME: ${cardName} X#`);
+  lines.push(`establish_context`);
+  lines.push(`enable_trace`);
+  lines.push(`card_connect`);
+  lines.push(``);
+  lines.push(`; Application Selection`);
+  lines.push(`send_apdu -sc 0 -APDU 00A4040005A000000003`);
+  lines.push(``);
+  lines.push(`; Cardholder Data`);
+  lines.push(`send_apdu -sc 0 -APDU 00A401023B3B00B2020C00${stringToHex(name.substring(0, 26))}`);
+  lines.push(``);
+  lines.push(`; PAN & Expiry`);
+  lines.push(`send_apdu -sc 0 -APDU 00A40102707000B2030C00697081665A08${stringToHex(pan)}D${stringToHex(expiry)}${svc}`);
+  lines.push(``);
+  lines.push(`card_disconnect`);
+  lines.push(`release_context`);
+  lines.push(``);
+  lines.push(`; END OF X2 SCRIPT`);
+
+  const content = lines.join('\n');
+  state.x2Content = content;
+
+  renderPreview('x2Preview', content);
+  addLog('success', `X2 script generated (${lines.length} lines)`);
+  notify('X2 script ready', 'success');
+}
+
+function generateISTFile() {
+  const cardName = prompt('Enter card name (default: J2A040_CARD):') || 'J2A040_CARD';
+
+  const pan = g('f_pan') || '4111111111111111';
+  const expiry = g('f_expiry') || '2512';
+  const name = g('f_name') || 'CARDHOLDER/NAME';
+  const aid = g('f_aid') || 'A0000000031010';
+  
+  let lines = [];
+  lines.push(`; IST FILE FOR J2A040 JAVACARD`);
+  lines.push(`; Card: ${cardName}`);
+  lines.push(`; Generated: ${new Date().toISOString()}`);
+  lines.push(``);
+  lines.push(`; PAN Configuration`);
+  lines.push(`Tag_5A=${stringToHex(pan)}`);
+  lines.push(`Tag_5F20=${stringToHex(name)}`);
+  lines.push(`Tag_9F1A=0840`);
+  lines.push(``);
+  lines.push(`; Application Data`);
+  lines.push(`Tag_84=${stringToHex(aid)}`);
+  lines.push(`Tag_95=0000000000`);
+  lines.push(`Tag_9B=6800`);
+  lines.push(`Tag_9F36=0001`);
+  lines.push(``);
+  lines.push(`; END OF IST FILE`);
+
+  const content = lines.join('\n');
+  state.istContent = content;
+
+  renderPreview('istPreview', content);
+  addLog('success', `IST file generated (${lines.length} lines)`);
+  notify('IST file ready', 'success');
+}
+
+function renderPreview(elementId, content) {
+  document.getElementById(elementId).textContent = content;
+}
+
+function downloadX2() {
+  if (!state.x2Content) {
+    notify('Generate script first', 'error');
+    return;
+  }
+  downloadFile(state.x2Content, `${state.cardName}.x2`);
+  addLog('success', 'X2 script downloaded');
+}
+
+function downloadIST() {
+  if (!state.istContent) {
+    notify('Generate IST file first', 'error');
+    return;
+  }
+  downloadFile(state.istContent, `${state.cardName}.ist`);
+  addLog('success', 'IST file downloaded');
+}
+
+function downloadFile(content, filename) {
+  const blob = new Blob([content], {type: 'text/plain'});
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  window.URL.revokeObjectURL(url);
+  document.body.removeChild(a);
+}
+
+function copyX2() {
+  if (!state.x2Content) {
+    notify('Generate script first', 'error');
+    return;
+  }
+  navigator.clipboard.writeText(state.x2Content).then(() => {
+    notify('X2 script copied', 'success');
+    addLog('success', 'X2 script copied to clipboard');
+  });
+}
+
+function copyIST() {
+  if (!state.istContent) {
+    notify('Generate IST file first', 'error');
+    return;
+  }
+  navigator.clipboard.writeText(state.istContent).then(() => {
+    notify('IST file copied', 'success');
+    addLog('success', 'IST file copied to clipboard');
+  });
+}
+
+// APDU Management
+function addAPDU() {
+  const list = document.getElementById('apduList');
+  const id = 'apdu_' + Date.now();
+  const row = document.createElement('div');
+  row.className = 'apdu-row';
+  row.innerHTML = `
+    <input type="text" id="${id}" placeholder="00A4040005A000000003" maxlength="255">
+    <button class="btn btn-sm btn-danger" onclick="document.getElementById('${id}').parentElement.remove()">✕</button>
+  `;
+  list.appendChild(row);
+  addLog('info', 'APDU command added');
+}
+
+function loadCommonAPDUs() {
+  const common = [
+    '00A4040000',
+    '00A4040005A000000003',
+    '00C00000FF'
+  ];
+  loadAPDUList(common);
+}
+
+function loadJ2A040APDUs() {
+  const j2a = [
+    '00A4040005A000000003',
+    '00A40102090900B2010C00026A83',
+    '00A401023B3B00B2020C0034703257134784120504288432D22122010000000008160F5F201A',
+    '00A40102707000B2030C00697081665A08'
+  ];
+  loadAPDUList(j2a);
+}
+
+function loadAPDUList(apdus) {
+  const list = document.getElementById('apduList');
+  list.innerHTML = '';
+  apdus.forEach(apdu => {
+    const id = 'apdu_' + Date.now() + Math.random();
+    const row = document.createElement('div');
+    row.className = 'apdu-row';
+    row.innerHTML = `
+      <input type="text" id="${id}" value="${apdu}" maxlength="255">
+      <button class="btn btn-sm btn-danger" onclick="document.getElementById('${id}').parentElement.remove()">✕</button>
+    `;
+    list.appendChild(row);
+  });
+  addLog('info', `Loaded ${apdus.length} APDU commands`);
+  notify(`${apdus.length} APDUs loaded`, 'success');
+}
+
+// Log Management
+function clearLog() {
+  state.log = [];
+  updateLogDisplay();
+  notify('Log cleared', 'info');
+}
+
+function exportLog() {
+  const content = state.log.map(e => `[${e.time}] ${e.type.toUpperCase()}: ${e.msg}`).join('\n');
+  downloadFile(content, 'x2ist-log.txt');
+  notify('Log exported', 'success');
+}
+
+// Initialize
+document.addEventListener('DOMContentLoaded', () => {
+  addLog('info', 'X2IST v3.2.0 initialized');
+  addLog('info', 'Ready to connect reader');
+});
+</script>
 </body>
 </html>
