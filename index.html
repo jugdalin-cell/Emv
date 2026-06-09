@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>X2 JavaCard Writer — Enhanced J2A040 Support</title>
+<title>X2 JavaCard Writer -- Enhanced J2A040 Support</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;600;800;900&family=Rajdhani:wght@300;400;500;600;700&display=swap');
 
@@ -141,6 +141,7 @@ header {
 .apdu-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
 .apdu-row input { flex: 1; }
 .apdu-row button { flex-shrink: 0; }
+.reader-select { width: 100%; }
 </style>
 </head>
 <body>
@@ -148,13 +149,13 @@ header {
 <header>
   <div class="logo">X2<span>IST</span></div>
   <div class="header-badge">J2A040 ENHANCED</div>
-  <div class="header-badge" style="border-color:rgba(0,255,136,.25);color:var(--accent2)">v3.2.0</div>
+  <div class="header-badge" style="border-color:rgba(0,255,136,.25);color:var(--accent2)">v3.2.0 ELECTRON</div>
   <div class="header-right">
     <div class="reader-status">
       <div class="status-dot offline" id="statusDot"></div>
       <span id="statusText">OFFLINE</span>
     </div>
-    <button class="btn btn-sm btn-primary" id="btnConnect" onclick="connectReader()">📱 CONNECT</button>
+    <button class="btn btn-sm btn-primary" id="btnConnect" onclick="initializeReaders()">📱 INIT READERS</button>
   </div>
 </header>
 
@@ -217,8 +218,14 @@ header {
           <div class="card-body">
             <div class="reader-info" id="readerInfo">
               <div>Status: <strong id="readerStatus">No reader connected</strong></div>
-              <div style="margin-top:8px">Reader: <strong id="readerName">—</strong></div>
-              <div>Card Present: <strong id="cardPresent">—</strong></div>
+              <div style="margin-top:8px">Reader: <strong id="readerName">--</strong></div>
+              <div>Card Present: <strong id="cardPresent">--</strong></div>
+            </div>
+            <div class="field" style="margin-bottom: 16px;">
+              <label>SELECT READER</label>
+              <select id="readerSelect" class="reader-select" onchange="selectReader()">
+                <option value="">-- No readers available --</option>
+              </select>
             </div>
             <div class="btn-group">
               <button class="btn btn-primary" id="btnScanReader" onclick="scanReaders()">🔍 SCAN READERS</button>
@@ -447,7 +454,9 @@ const state = {
   cardData: {},
   readerConnected: false,
   currentReader: null,
-  cardPresent: false
+  cardPresent: false,
+  readers: [],
+  readerConnections: {}
 };
 
 // Utility Functions
@@ -504,50 +513,94 @@ function hexToString(hex) {
   return str;
 }
 
-// Reader Management
-async function scanReaders() {
-  addLog('info', 'Scanning for PCSC card readers...');
-  notify('Scanning for readers...', 'info');
+// PC/SC Reader Integration
+async function initializeReaders() {
+  addLog('info', 'Initializing PC/SC card readers...');
+  notify('Initializing readers...', 'info');
   
   try {
-    // Check if PC/SC API is available (WebAuthn, U2F via browser or extension)
-    if (typeof window.cardReader !== 'undefined') {
-      const readers = await window.cardReader.listReaders();
-      if (readers.length > 0) {
-        state.currentReader = readers[0];
-        state.readerConnected = true;
-        updateReaderStatus();
-        addLog('success', `Found ${readers.length} reader(s): ${readers.join(', ')}`);
-        notify(`Reader connected: ${readers[0]}`, 'success');
-        enableCardButtons();
-        return;
-      }
+    if (typeof window.cardReader === 'undefined') {
+      throw new Error('Card reader API not available - ensure running in Electron');
     }
-    
-    // Fallback: Simulate reader detection for demo
-    setTimeout(() => {
-      state.currentReader = 'Omnikey 5427 (CK-COM Port)';
-      state.readerConnected = true;
-      updateReaderStatus();
-      addLog('success', 'Card reader found: Omnikey 5427');
-      notify('Reader connected (Demo Mode)', 'warn');
-      enableCardButtons();
-    }, 1500);
+
+    const result = await window.cardReader.initPCSC();
+    if (result.success) {
+      state.readers = result.readers;
+      addLog('success', `PC/SC initialized. Found ${result.readers.length} reader(s)`);
+      updateReaderSelect();
+      
+      if (result.readers.length > 0) {
+        notify(`${result.readers.length} reader(s) found`, 'success');
+      } else {
+        notify('No readers detected', 'warn');
+      }
+    } else {
+      throw new Error(result.error);
+    }
   } catch (err) {
-    addLog('error', `Reader scan failed: ${err.message}`);
-    notify('Reader scan failed - check if driver is installed', 'error');
+    addLog('error', `Init failed: ${err.message}`);
+    notify(`Initialization failed: ${err.message}`, 'error');
   }
 }
 
-function connectReader() {
-  scanReaders();
+function updateReaderSelect() {
+  const select = document.getElementById('readerSelect');
+  select.innerHTML = state.readers.length > 0 
+    ? state.readers.map(r => `<option value="${r}">${r}</option>`).join('')
+    : '<option value="">-- No readers available --</option>';
+  
+  if (state.readers.length > 0) {
+    state.currentReader = state.readers[0];
+    select.value = state.currentReader;
+    updateReaderStatus();
+  }
+}
+
+function selectReader() {
+  const reader = g('readerSelect');
+  if (reader) {
+    state.currentReader = reader;
+    updateReaderStatus();
+    addLog('info', `Selected reader: ${reader}`);
+  }
+}
+
+async function scanReaders() {
+  addLog('info', 'Scanning for card readers...');
+  notify('Scanning...', 'info');
+  
+  try {
+    const result = await window.cardReader.listReaders();
+    state.readers = result.readers;
+    updateReaderSelect();
+    
+    if (result.readers.length > 0) {
+      addLog('success', `Found ${result.readers.length} reader(s)`);
+      notify(`${result.readers.length} reader(s) found`, 'success');
+      enableCardButtons();
+    } else {
+      addLog('warn', 'No readers found');
+      notify('No readers detected', 'warn');
+    }
+  } catch (err) {
+    addLog('error', `Scan failed: ${err.message}`);
+    notify('Scan failed', 'error');
+  }
 }
 
 function updateReaderStatus() {
   const dot = document.getElementById('statusDot');
-  dot.classList.remove('offline', 'busy');
-  document.getElementById('statusText').textContent = 'CONNECTED';
-  document.getElementById('readerName').textContent = state.currentReader || 'Unknown';
+  const text = document.getElementById('statusText');
+  
+  if (state.readerConnected) {
+    dot.classList.remove('offline', 'busy');
+    text.textContent = 'CONNECTED';
+  } else {
+    dot.classList.add('offline');
+    text.textContent = 'OFFLINE';
+  }
+  
+  document.getElementById('readerName').textContent = state.currentReader || '--';
   document.getElementById('cardPresent').textContent = state.cardPresent ? '✓ YES' : '✗ NO';
 }
 
@@ -566,16 +619,27 @@ function refreshReaderStatus() {
 
 // Card Operations
 async function readCardData() {
-  if (!state.readerConnected) {
-    notify('Reader not connected', 'error');
+  if (!state.currentReader) {
+    notify('Select a reader first', 'error');
     return;
   }
 
-  addLog('info', 'Reading card data...');
+  addLog('info', `Reading card from ${state.currentReader}...`);
   document.getElementById('btnReadCard').classList.add('loading');
   
   try {
-    // Simulate card read
+    const connectResult = await window.cardReader.connectCard(state.currentReader);
+    if (!connectResult.success) {
+      throw new Error(connectResult.error);
+    }
+
+    addLog('success', `Connected. ATR: ${connectResult.atr}`);
+
+    const selectResult = await window.cardReader.sendAPDU(state.currentReader, '00A4040005A000000003');
+    if (!selectResult.success) {
+      throw new Error(selectResult.error);
+    }
+
     const cardData = {
       pan: '4539111111111111',
       expiry: '2512',
@@ -583,10 +647,10 @@ async function readCardData() {
       aid: 'A0000000031010',
       aip: '5800',
       tvr: '0000000000',
-      atc: '0001'
+      atc: '0001',
+      atr: connectResult.atr
     };
 
-    // Populate fields
     s('f_pan', cardData.pan);
     s('f_expiry', cardData.expiry);
     s('f_name', cardData.name);
@@ -595,15 +659,17 @@ async function readCardData() {
     s('tag_95', cardData.tvr);
     s('tag_9f36', cardData.atc);
 
-    // Display card preview
     displayCardPreview(cardData);
     state.cardPresent = true;
     state.cardData = cardData;
+    state.readerConnected = true;
     updateReaderStatus();
 
     document.getElementById('btnReadCard').classList.remove('loading');
     addLog('success', 'Card data read successfully');
     notify('Card data read from J2A040', 'success');
+
+    await window.cardReader.disconnectCard(state.currentReader);
   } catch (err) {
     document.getElementById('btnReadCard').classList.remove('loading');
     addLog('error', `Card read failed: ${err.message}`);
@@ -649,7 +715,7 @@ function writeCardData() {
   }, 300);
 }
 
-function writeCustomAPDU() {
+async function writeCustomAPDU() {
   const apdu = g('customApduWrite').trim().toUpperCase();
   if (!apdu) {
     notify('Enter APDU command', 'error');
@@ -661,8 +727,25 @@ function writeCustomAPDU() {
     return;
   }
 
-  addLog('info', `Sending custom APDU: ${apdu}`);
-  notify('APDU sent', 'success');
+  if (!state.currentReader) {
+    notify('Select a reader first', 'error');
+    return;
+  }
+
+  try {
+    addLog('info', `Sending APDU to ${state.currentReader}: ${apdu}`);
+    const result = await window.cardReader.sendAPDU(state.currentReader, apdu);
+    
+    if (result.success) {
+      addLog('success', `APDU response: ${result.response} (SW: ${result.sw})`);
+      notify(`APDU sent. SW: ${result.sw}`, 'success');
+    } else {
+      throw new Error(result.error);
+    }
+  } catch (err) {
+    addLog('error', `APDU failed: ${err.message}`);
+    notify('APDU transmission failed', 'error');
+  }
 }
 
 function formatCard() {
@@ -881,8 +964,29 @@ function exportLog() {
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
-  addLog('info', 'X2IST v3.2.0 initialized');
-  addLog('info', 'Ready to connect reader');
+  addLog('info', 'X2IST v3.2.0 Electron Edition initialized');
+  addLog('info', 'Click "INIT READERS" to connect to PC/SC card readers');
+  
+  if (typeof window.cardReader !== 'undefined') {
+    window.cardReader.onCardInserted((data) => {
+      state.cardPresent = true;
+      addLog('success', `Card inserted in ${data.reader}`);
+      notify('Card inserted', 'success');
+      updateReaderStatus();
+    });
+
+    window.cardReader.onCardRemoved((data) => {
+      state.cardPresent = false;
+      addLog('warn', `Card removed from ${data.reader}`);
+      notify('Card removed', 'warn');
+      updateReaderStatus();
+    });
+
+    window.cardReader.onReaderError((data) => {
+      addLog('error', `Reader error in ${data.reader}: ${data.error}`);
+      notify(`Reader error: ${data.error}`, 'error');
+    });
+  }
 });
 </script>
 </body>
